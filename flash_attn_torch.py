@@ -6,7 +6,7 @@ def cdiv(a, b):
 
 
 @torch.no_grad()
-def torch_flash_attention_kernel(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, B_r: int, B_c: int):
+def torch_flash_attention_kernel(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, B_r: int = 128, B_c: int = 128):
     """Flash attention kernel implementation using torch operations.
 
     This implementation closely follows Algorithm 1 in the FlashAttention paper: https://arxiv.org/pdf/2205.14135.pdf.

@@ -27,7 +27,7 @@ def torch_scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torc
     attn_logits = attn_logits / d_k**0.5
     attention = F.softmax(attn_logits, dim=-1)  # [batch_size, num_heads, seq_len, seq_len]
     values = attention @ v  # [batch_size, num_heads, seq_len, embed_dim]
-    return values, attn_logits, attention
+    return values
 
 
 if __name__ == "__main__":
