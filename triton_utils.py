@@ -40,10 +40,10 @@ def breakpoint_if(conds, pid_0=[0], pid_1=[0], pid_2=[0]):
         set_trace()
 
 
-def print_if(txt, conds, pid_0=[0], pid_1=[0], pid_2=[0]):
+def print_if(conds, *args, pid_0=[0], pid_1=[0], pid_2=[0]):
     """Print txt, if any condition of pids is fulfilled"""
     if test_pid_conds(conds, pid_0, pid_1, pid_2):
-        print(txt)
+        print(*args)
 
 
 def check_tensors_gpu_ready(*tensors):

@@ -1,4 +1,5 @@
 torch>=2.2
-triton>=2.2
+--index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/Triton-Nightly/pypi/simple/
+triton-nightly>=3.0.0
 numpy
 pytest

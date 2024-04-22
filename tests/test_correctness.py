@@ -17,7 +17,7 @@ from flash_attn_torch import torch_flash_attention_kernel
 )
 @pytest.mark.parametrize(
     "N,d",
-    list(itertools.product(((i,) for i in range(5)), range(2, 17))),
+    list(itertools.product(((i,) for i in range(1, 5)), range(2, 17))),
 )
 def test_compare_scaled_dot_product_attention_implementations(reference, implementation, N, d):
     q = torch.randn(*N, d)

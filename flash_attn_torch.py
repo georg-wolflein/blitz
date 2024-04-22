@@ -1,12 +1,31 @@
 import torch
+from typing import Optional
 
 
 def cdiv(a, b):
     return (a + b - 1) // b
 
 
+def pad_to(x, dim, size, value=0.0):
+    """Append padding to the input tensor x to match the target size along the given dimension."""
+    pad_size = size - x.size(dim)
+    if pad_size > 0:
+        pad_dims = list(x.shape)
+        pad_dims[dim] = pad_size
+        pad = torch.full(pad_dims, value, dtype=x.dtype, device=x.device)
+        x = torch.cat([x, pad], dim=dim)
+    return x
+
+
 @torch.no_grad()
-def torch_flash_attention_kernel(Q: torch.Tensor, K: torch.Tensor, V: torch.Tensor, B_r: int = 128, B_c: int = 128):
+def torch_flash_attention_kernel(
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    softmax_scale: Optional[float] = None,
+    B_r: int = 128,
+    B_c: int = 128,
+):
     """Flash attention kernel implementation using torch operations.
 
     This implementation closely follows Algorithm 1 in the FlashAttention paper: https://arxiv.org/pdf/2205.14135.pdf.
@@ -24,11 +43,12 @@ def torch_flash_attention_kernel(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
 
     N, d = Q.shape
     dtype = Q.dtype
+    device = Q.device
 
-    # 2. Initialize O, l, m in HBM
-    O = torch.zeros(N, d, device=Q.device, dtype=dtype)  # [N, d]
-    l = torch.zeros(N, device=Q.device, dtype=dtype)  # [N]
-    m = torch.full((N,), float("-inf"), device=Q.device, dtype=dtype)  # [N]
+    softmax_scale = softmax_scale or 1.0 / (d**0.5)
+
+    # 2. Initialize O in HBM
+    O = torch.zeros(N, d, device=device, dtype=dtype)  # [N, d]
 
     # 3. Divide Q into T_r blocks of size [B_r, d] each
     T_r = cdiv(N, B_r)
@@ -40,33 +60,36 @@ def torch_flash_attention_kernel(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
     V = list(torch.split(V, B_c))  # [T_c, B_c, d]
 
     # 4. Divide O into T_r blocks of size [B_r, d] each
-    O = list(torch.split(O, B_r))  # [T_r, B_r, d]
+    O = list()
 
-    # 4. Divide l into T_r blocks of size [B_r] each
-    l = list(torch.split(l, B_r))  # [T_r, B_r]
+    # 7. Outer loop (NOTE: in Algorithm 1, this is the inner loop)
+    for i in range(T_r):
+        # 8. Load Q_i, O_i, l_i, m_i into SRAM
+        Q_i = Q[i]  # [B_r, d]
+        Q_i = pad_to(Q_i, 0, B_r)  # simulate padding
 
-    # 4. Divide m into T_r blocks of size [B_r] each
-    m = list(torch.split(m, B_r))  # [T_r, B_r]
+        # 2. and 4. Divide l, m into T_r blocks of size [B_r] each
+        l_i = torch.zeros(B_r, device=device, dtype=dtype)  # [B_r]
+        m_i = torch.full((B_r,), float("-inf"), device=device, dtype=dtype)  # [B_r]
+        O_i = torch.zeros(B_r, d, device=device, dtype=dtype)  # [B_r, B_c]
 
-    # 5. Outer loop
-    for j in range(T_c):
-        # 6. Load K_j, V_j into SRAM
-        K_j = K[j]  # [B_c, d]
-        V_j = V[j]  # [B_c, d]
+        # 5. Inner loop (NOTE: in Algorithm 1, this is the outer loop)
+        for j in range(T_c):
+            # 6. Load K_j, V_j into SRAM
+            K_j = K[j]  # [B_c, d]
+            V_j = V[j]  # [B_c, d]
 
-        # 7. Inner loop
-        for i in range(T_r):
-            # 8. Load Q_i, O_i, l_i, m_i into SRAM
-            Q_i = Q[i]  # [B_r, d]
-            O_i = O[i]  # [B_r, d]
-            l_i = l[i]  # [B_r]
-            m_i = m[i]  # [B_r]
+            K_j = pad_to(K_j, 0, B_c)  # simulate padding
+            V_j = pad_to(V_j, 0, B_c)  # simulate padding
 
             # 9. On chip, compute S_ij = Q_i @ K_j^T
             S_ij = Q_i @ K_j.T  # [B_r, B_c]
 
             # 9a. Scale by sqrt(d) (not in the paper, but part of the attention formula)
-            S_ij = S_ij / (d**0.5)
+            S_ij = S_ij * softmax_scale
+
+            # 9b. Mask out-of-bounds elements
+            S_ij = torch.where(torch.arange(B_c, device=device).unsqueeze(0) + j * B_c < N, S_ij, -float("inf"))
 
             # 10. On chip, compute mtilde_ij = rowmax(S_ij)
             mtilde_ij = S_ij.max(dim=1).values  # [B_r]
@@ -81,29 +104,23 @@ def torch_flash_attention_kernel(Q: torch.Tensor, K: torch.Tensor, V: torch.Tens
             mnew_i = torch.maximum(m_i, mtilde_ij)  # [B_r]
 
             # 11. On chip, compute lnew_i = exp(m_i - mnew_i) * l_i + exp(mtilde_ij - mnew_i) * ltilde_ij
-            lnew_i = torch.exp(m_i - mnew_i) * l_i + torch.exp(mtilde_ij - mnew_i) * ltilde_ij  # [B_r]
+            alpha = torch.exp(m_i - mnew_i)  # [B_r]
+            beta = torch.exp(mtilde_ij - mnew_i)  # [B_r]
+            lnew_i = alpha * l_i + beta * ltilde_ij  # [B_r]
 
             # 12. Write O_i = diag(lnew_i)^-1 (diag(l_i) exp(m_i - mnew_i) O_i + exp(mtilde_ij - mnew_i) Ptilde_ij V_j) to HBM
-            #           O_i = a @ (b + c)
-            #           where:
-            #             a = diag(lnew_i) ** -1                             [B_r, B_r]
-            #             b = diag(l_i) * exp(m_i - mnew_i) @ O_i            [B_r, d]
-            #                 [B_r, B_r]  [B_r]               [B_r, d]
-            #             c = exp(mtilde_ij - mnew_i) * Ptilde_ij @ V_j      [B_r, d]
-            #                 [B_r]                     [B_r, B_c]  [B_c, d]
-            _a = torch.diag(lnew_i**-1)  # [B_r, B_r]
-            _b = torch.diag(l_i) * torch.exp(m_i - mnew_i) @ O_i  # [B_r, d]
-            _c = torch.exp(mtilde_ij - mnew_i).unsqueeze(1) * Ptilde_ij @ V_j
-            O_i = _a @ (_b + _c)
-            O[i] = O_i  # write to HBM
+            P_scale = beta / lnew_i  # [B_r]
+            O_scale = l_i / lnew_i * alpha  # [B_r]
+            O_i = O_i * O_scale.unsqueeze(1) + (Ptilde_ij * P_scale.unsqueeze(1)) @ V_j
 
             # 13. Write l_i = lnew_i to HBM
             l_i = lnew_i
-            l[i] = l_i  # write to HBM
 
             # 13. Write m_i = mnew_i to HBM
             m_i = mnew_i
-            m[i] = m_i  # write to HBM
+
+        O.append(O_i)  # write to HBM
 
     O = torch.cat(O)
+    O = O[:N]  # remove padding
     return O
