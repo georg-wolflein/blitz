@@ -18,7 +18,7 @@ def pad_to(x, dim, size, value=0.0):
 
 
 @torch.no_grad()
-def torch_flash_attention_kernel(
+def torch_flash_attention(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,

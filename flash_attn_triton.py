@@ -7,6 +7,16 @@ def cdiv(a, b):
     return (a + b - 1) // b
 
 
+# @triton.autotune(
+#     [
+#         triton.Config({"B_r": B_r, "B_c": B_c}, num_warps=num_warps, num_stages=num_stages)
+#         for B_r in [32, 64, 128]
+#         for B_c in [32, 64, 128]
+#         for num_warps in [4, 8]
+#         for num_stages in [3, 4, 5]
+#     ],
+#     key=["Z", "H", "N", "D"],
+# )
 @triton.jit
 def triton_flash_attention_kernel(
     Q_ptr,
@@ -29,15 +39,15 @@ def triton_flash_attention_kernel(
     stride_OH,
     stride_ON,
     stride_OD,
-    Z: int,
-    H: int,
-    N: int,
-    D: int,
+    Z: int,  # batch size
+    H: int,  # number of heads
+    N: int,  # sequence length
+    D: int,  # embedding dimension (per head)
     softmax_scale: float,
     B_r: tl.constexpr,
     B_c: tl.constexpr,
     B_d: tl.constexpr,
-    allow_tf32: tl.constexpr = False,
+    allow_tf32: tl.constexpr = True,
 ):
     assert D == B_d
 
@@ -151,19 +161,29 @@ def triton_flash_attention_kernel(
     tl.store(O_i_ptrs, O_i, boundary_check=(0, 1))
 
 
-def triton_flash_attention(Q, K, V, B_r, B_c):
+def triton_flash_attention(Q, K, V, **kwargs):
     Z, H, N, D = Q.shape
     dtype = Q.dtype
+
+    softmax_scale = 1.0 / D**0.5
 
     # 2. Initialize O, l, m in HBM
     O = torch.zeros(Z, H, N, D, device=Q.device, dtype=dtype)  # [N, d]
 
-    B_d = D
+    B_d = triton.next_power_of_2(D)
+    B_r = 128 if D <= 128 else 64
+    B_c = 64 if D <= 64 else 32
+    num_stages = 4 if D <= 64 else (3 if D <= 128 else 2)
+    num_warps = 8
 
-    T_r = cdiv(N, B_r)
-    softmax_scale = 1.0 / D**0.5
+    # print(f"Using B_r={B_r}, B_c={B_c}, num_warps={num_warps}, num_stages={num_stages} for {Z=}, {H=}, {N=}, {D=}")
 
-    grid = (T_r, Z * H)
+    B_r = kwargs.get("B_r", B_r)
+    B_c = kwargs.get("B_c", B_c)
+    num_warps = kwargs.get("num_warps", num_warps)
+    num_stages = kwargs.get("num_stages", num_stages)
+
+    grid = lambda meta: (cdiv(N, meta["B_r"]), Z * H)
 
     triton_flash_attention_kernel[grid](
         Q,
@@ -186,13 +206,37 @@ def triton_flash_attention(Q, K, V, B_r, B_c):
         O.stride(1),
         O.stride(2),
         O.stride(3),
-        Z,
-        H,
-        N,
-        D,
-        softmax_scale,
-        B_r,
-        B_c,
-        B_d,
+        Z=Z,
+        H=H,
+        N=N,
+        D=D,
+        softmax_scale=softmax_scale,
+        B_d=B_d,
+        B_r=B_r,
+        B_c=B_c,
+        num_stages=num_stages,
+        num_warps=num_warps,
     )
     return O
+
+
+if __name__ == "__main__":
+    embed_dim = 1024
+    Z = 1
+    H = 4
+    N = 1024
+    D = embed_dim // H
+
+    Q = torch.randn(Z, H, N, D, device="cuda")
+    K = torch.randn(Z, H, N, D, device="cuda")
+    V = torch.randn(Z, H, N, D, device="cuda")
+
+    from torch.utils import benchmark
+
+    t = benchmark.Timer(
+        setup="from __main__ import triton_flash_attention",
+        stmt="triton_flash_attention(Q, K, V)",
+        globals={"Q": Q, "K": K, "V": V},
+        num_threads=1,
+    )
+    print(t.blocked_autorange(min_run_time=1.0))

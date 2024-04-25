@@ -2,7 +2,7 @@ import torch
 from torch.nn import functional as F
 
 
-def torch_scaled_dot_product_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+def torch_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
     """Reference implementation of scaled dot product attention using torch operations.
 
     Args:
@@ -48,9 +48,9 @@ if __name__ == "__main__":
     q = q.contiguous().cuda()
     k = k.contiguous().cuda()
     v = v.contiguous().cuda()
-    torch_scaled_dot_product_attention = torch.compile(torch_scaled_dot_product_attention)
+    torch_attention = torch.compile(torch_attention)
 
-    values, *_ = torch_scaled_dot_product_attention(q, k, v)
+    values, *_ = torch_attention(q, k, v)
     assert values.shape == (B, H, S, D_v)
 
     print(values)
