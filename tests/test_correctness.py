@@ -14,12 +14,12 @@ from flash_attn_triton import triton_flash_attention
     [
         (F.scaled_dot_product_attention, torch_attention),
         (F.scaled_dot_product_attention, partial(torch_flash_attention, B_r=16, B_c=16)),
-        (F.scaled_dot_product_attention, partial(triton_flash_attention, B_r=16, B_c=16)),
+        (F.scaled_dot_product_attention, partial(triton_flash_attention, B_r=16, B_c=16, allow_tf32=False)),
     ],
 )
-@pytest.mark.parametrize("Z", (1, 3, 4, 16, 17))
+@pytest.mark.parametrize("Z", (1, 3, 4))
 @pytest.mark.parametrize("H", (1, 2, 3, 4, 7, 8))
-@pytest.mark.parametrize("N", (16, 17, 31, 32, 33))
+@pytest.mark.parametrize("N", (16, 17, 1023, 1024, 1025))
 @pytest.mark.parametrize("D", (16, 32, 64))
 def test_compare_scaled_dot_product_attention_implementations(reference, implementation, Z, H, N, D):
     q = torch.randn(Z, H, N, D)

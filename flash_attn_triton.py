@@ -161,7 +161,7 @@ def triton_flash_attention_kernel(
     tl.store(O_i_ptrs, O_i, boundary_check=(0, 1))
 
 
-def triton_flash_attention(Q, K, V, **kwargs):
+def triton_flash_attention(Q, K, V, allow_tf32=True, **kwargs):
     Z, H, N, D = Q.shape
     dtype = Q.dtype
 
@@ -216,6 +216,7 @@ def triton_flash_attention(Q, K, V, **kwargs):
         B_c=B_c,
         num_stages=num_stages,
         num_warps=num_warps,
+        allow_tf32=allow_tf32,
     )
     return O
 
